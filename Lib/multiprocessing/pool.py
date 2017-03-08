@@ -521,6 +521,7 @@ class Pool(object):
         while task_handler.is_alive() and inqueue._reader.poll():
             inqueue._reader.recv()
             time.sleep(0)
+        inqueue._rlock.release()
 
     @classmethod
     def _terminate_pool(cls, taskqueue, inqueue, outqueue, pool,
@@ -529,10 +530,11 @@ class Pool(object):
         util.debug('finalizing pool')
 
         worker_handler._state = TERMINATE
-        task_handler._state = TERMINATE
 
         util.debug('helping task handler/workers to finish')
         cls._help_stuff_finish(inqueue, task_handler, len(pool))
+
+        task_handler._state = TERMINATE
 
         assert result_handler.is_alive() or len(cache) == 0
 

@@ -518,9 +518,14 @@ class Pool(object):
         # task_handler may be blocked trying to put items on inqueue
         util.debug('removing tasks from inqueue until task handler finished')
         inqueue._rlock.acquire()
+        sentinels_taken = 0
         while task_handler.is_alive() and inqueue._reader.poll():
-            inqueue._reader.recv()
+            obj = inqueue._reader.recv()
+            if obj is None:
+                sentinels_taken += 1
             time.sleep(0)
+        for _ in range(sentinels_taken):
+            inqueue._writer.send(None)
         inqueue._rlock.release()
 
     @classmethod
@@ -531,6 +536,12 @@ class Pool(object):
 
         worker_handler._state = TERMINATE
 
+        # We must wait for the worker handler to exit before terminating
+        # workers because we don't want workers to be restarted behind our back.
+        util.debug('joining worker handler')
+        if threading.current_thread() is not worker_handler:
+            worker_handler.join()
+
         util.debug('helping task handler/workers to finish')
         cls._help_stuff_finish(inqueue, task_handler, len(pool))
 
@@ -540,12 +551,6 @@ class Pool(object):
 
         result_handler._state = TERMINATE
         outqueue.put(None)                  # sentinel
-
-        # We must wait for the worker handler to exit before terminating
-        # workers because we don't want workers to be restarted behind our back.
-        util.debug('joining worker handler')
-        if threading.current_thread() is not worker_handler:
-            worker_handler.join()
 
         # Terminate workers which haven't already finished.
         if pool and hasattr(pool[0], 'terminate'):

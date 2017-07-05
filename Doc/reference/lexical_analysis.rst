@@ -313,7 +313,7 @@ The Unicode category codes mentioned above stand for:
 * *Nd* - decimal numbers
 * *Pc* - connector punctuations
 * *Other_ID_Start* - explicit list of characters in `PropList.txt
-  <http://www.unicode.org/Public/8.0.0/ucd/PropList.txt>`_ to support backwards
+  <http://www.unicode.org/Public/10.0.0/ucd/PropList.txt>`_ to support backwards
   compatibility
 * *Other_ID_Continue* - likewise
 
@@ -696,6 +696,17 @@ a temporary variable.
    >>> f"newline: {newline}"
    'newline: 10'
 
+Formatted string literals cannot be used as docstrings, even if they do not
+include expressions.
+
+::
+
+   >>> def foo():
+   ...     f"Not a docstring"
+   ...
+   >>> foo.__doc__ is None
+   True
+
 See also :pep:`498` for the proposal that added formatted string literals,
 and :meth:`str.format`, which uses a related format string mechanism.
 
@@ -864,4 +875,4 @@ occurrence outside string literals and comments is an unconditional error:
 
 .. rubric:: Footnotes
 
-.. [#] http://www.unicode.org/Public/8.0.0/ucd/NameAliases.txt
+.. [#] http://www.unicode.org/Public/10.0.0/ucd/NameAliases.txt

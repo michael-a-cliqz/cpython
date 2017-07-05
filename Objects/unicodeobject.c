@@ -2953,8 +2953,7 @@ PyUnicode_FromFormat(const char *format, ...)
 
 #ifdef HAVE_WCHAR_H
 
-/* Helper function for PyUnicode_AsWideChar() and PyUnicode_AsWideCharString():
-   convert a Unicode object to a wide character string.
+/* Convert a Unicode object to a wide character string.
 
    - If w is NULL: return the number of wide characters (including the null
      character) required to convert the unicode object. Ignore size argument.
@@ -2962,14 +2961,18 @@ PyUnicode_FromFormat(const char *format, ...)
    - Otherwise: return the number of wide characters (excluding the null
      character) written into w. Write at most size wide characters (including
      the null character). */
-static Py_ssize_t
-unicode_aswidechar(PyObject *unicode,
-                   wchar_t *w,
-                   Py_ssize_t size)
+Py_ssize_t
+PyUnicode_AsWideChar(PyObject *unicode,
+                     wchar_t *w,
+                     Py_ssize_t size)
 {
     Py_ssize_t res;
     const wchar_t *wstr;
 
+    if (unicode == NULL) {
+        PyErr_BadInternalCall();
+        return -1;
+    }
     wstr = PyUnicode_AsUnicodeAndSize(unicode, &res);
     if (wstr == NULL)
         return -1;
@@ -2986,23 +2989,12 @@ unicode_aswidechar(PyObject *unicode,
         return res + 1;
 }
 
-Py_ssize_t
-PyUnicode_AsWideChar(PyObject *unicode,
-                     wchar_t *w,
-                     Py_ssize_t size)
-{
-    if (unicode == NULL) {
-        PyErr_BadInternalCall();
-        return -1;
-    }
-    return unicode_aswidechar(unicode, w, size);
-}
-
 wchar_t*
 PyUnicode_AsWideCharString(PyObject *unicode,
                            Py_ssize_t *size)
 {
-    wchar_t* buffer;
+    const wchar_t *wstr;
+    wchar_t *buffer;
     Py_ssize_t buflen;
 
     if (unicode == NULL) {
@@ -3010,19 +3002,22 @@ PyUnicode_AsWideCharString(PyObject *unicode,
         return NULL;
     }
 
-    buflen = unicode_aswidechar(unicode, NULL, 0);
-    if (buflen == -1)
+    wstr = PyUnicode_AsUnicodeAndSize(unicode, &buflen);
+    if (wstr == NULL) {
         return NULL;
-    buffer = PyMem_NEW(wchar_t, buflen);
+    }
+    if (size == NULL && wcslen(wstr) != (size_t)buflen) {
+        PyErr_SetString(PyExc_ValueError,
+                        "embedded null character");
+        return NULL;
+    }
+
+    buffer = PyMem_NEW(wchar_t, buflen + 1);
     if (buffer == NULL) {
         PyErr_NoMemory();
         return NULL;
     }
-    buflen = unicode_aswidechar(unicode, buffer, buflen);
-    if (buflen == -1) {
-        PyMem_FREE(buffer);
-        return NULL;
-    }
+    memcpy(buffer, wstr, (buflen + 1) * sizeof(wchar_t));
     if (size != NULL)
         *size = buflen;
     return buffer;
@@ -3633,7 +3628,8 @@ PyUnicode_AsEncodedString(PyObject *unicode,
             return NULL;
         }
 
-        b = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(v), Py_SIZE(v));
+        b = PyBytes_FromStringAndSize(PyByteArray_AS_STRING(v),
+                                      PyByteArray_GET_SIZE(v));
         Py_DECREF(v);
         return b;
     }
@@ -3906,6 +3902,7 @@ PyUnicode_FSDecoder(PyObject* arg, void* addr)
     PyObject *output = NULL;
     if (arg == NULL) {
         Py_DECREF(*(PyObject**)addr);
+        *(PyObject**)addr = NULL;
         return 1;
     }
 
@@ -4134,6 +4131,20 @@ Py_UNICODE *
 PyUnicode_AsUnicode(PyObject *unicode)
 {
     return PyUnicode_AsUnicodeAndSize(unicode, NULL);
+}
+
+const Py_UNICODE *
+_PyUnicode_AsUnicode(PyObject *unicode)
+{
+    Py_ssize_t size;
+    const Py_UNICODE *wstr;
+
+    wstr = PyUnicode_AsUnicodeAndSize(unicode, &size);
+    if (wstr && wcslen(wstr) != (size_t)size) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        return NULL;
+    }
+    return wstr;
 }
 
 
@@ -11282,7 +11293,16 @@ PyUnicode_Concat(PyObject *left, PyObject *right)
     Py_UCS4 maxchar, maxchar2;
     Py_ssize_t left_len, right_len, new_len;
 
-    if (ensure_unicode(left) < 0 || ensure_unicode(right) < 0)
+    if (ensure_unicode(left) < 0)
+        return NULL;
+
+    if (!PyUnicode_Check(right)) {
+        PyErr_Format(PyExc_TypeError,
+                     "can only concatenate str (not \"%.200s\") to str",
+                     right->ob_type->tp_name);
+        return NULL;
+    }
+    if (PyUnicode_READY(right) < 0)
         return NULL;
 
     /* Shortcuts */
@@ -11687,7 +11707,11 @@ unicode_hash(PyObject *self)
 PyDoc_STRVAR(index__doc__,
              "S.index(sub[, start[, end]]) -> int\n\
 \n\
-Like S.find() but raise ValueError when the substring is not found.");
+Return the lowest index in S where substring sub is found, \n\
+such that sub is contained within S[start:end].  Optional\n\
+arguments start and end are interpreted as in slice notation.\n\
+\n\
+Raises ValueError when the substring is not found.");
 
 static PyObject *
 unicode_index(PyObject *self, PyObject *args)
@@ -11748,14 +11772,14 @@ unicode_islower_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     cased = 0;
     for (i = 0; i < length; i++) {
         const Py_UCS4 ch = PyUnicode_READ(kind, data, i);
 
         if (Py_UNICODE_ISUPPER(ch) || Py_UNICODE_ISTITLE(ch))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
         else if (!cased && Py_UNICODE_ISLOWER(ch))
             cased = 1;
     }
@@ -11793,14 +11817,14 @@ unicode_isupper_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     cased = 0;
     for (i = 0; i < length; i++) {
         const Py_UCS4 ch = PyUnicode_READ(kind, data, i);
 
         if (Py_UNICODE_ISLOWER(ch) || Py_UNICODE_ISTITLE(ch))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
         else if (!cased && Py_UNICODE_ISUPPER(ch))
             cased = 1;
     }
@@ -11840,7 +11864,7 @@ unicode_istitle_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     cased = 0;
     previous_is_cased = 0;
@@ -11849,13 +11873,13 @@ unicode_istitle_impl(PyObject *self)
 
         if (Py_UNICODE_ISUPPER(ch) || Py_UNICODE_ISTITLE(ch)) {
             if (previous_is_cased)
-                return PyBool_FromLong(0);
+                Py_RETURN_FALSE;
             previous_is_cased = 1;
             cased = 1;
         }
         else if (Py_UNICODE_ISLOWER(ch)) {
             if (!previous_is_cased)
-                return PyBool_FromLong(0);
+                Py_RETURN_FALSE;
             previous_is_cased = 1;
             cased = 1;
         }
@@ -11895,14 +11919,14 @@ unicode_isspace_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < length; i++) {
         const Py_UCS4 ch = PyUnicode_READ(kind, data, i);
         if (!Py_UNICODE_ISSPACE(ch))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 /*[clinic input]
@@ -11935,13 +11959,13 @@ unicode_isalpha_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < length; i++) {
         if (!Py_UNICODE_ISALPHA(PyUnicode_READ(kind, data, i)))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 /*[clinic input]
@@ -11976,14 +12000,14 @@ unicode_isalnum_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (len == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < len; i++) {
         const Py_UCS4 ch = PyUnicode_READ(kind, data, i);
         if (!Py_UNICODE_ISALNUM(ch))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 /*[clinic input]
@@ -12016,13 +12040,13 @@ unicode_isdecimal_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < length; i++) {
         if (!Py_UNICODE_ISDECIMAL(PyUnicode_READ(kind, data, i)))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 /*[clinic input]
@@ -12056,13 +12080,13 @@ unicode_isdigit_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < length; i++) {
         if (!Py_UNICODE_ISDIGIT(PyUnicode_READ(kind, data, i)))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 /*[clinic input]
@@ -12095,13 +12119,13 @@ unicode_isnumeric_impl(PyObject *self)
 
     /* Special case for empty strings */
     if (length == 0)
-        return PyBool_FromLong(0);
+        Py_RETURN_FALSE;
 
     for (i = 0; i < length; i++) {
         if (!Py_UNICODE_ISNUMERIC(PyUnicode_READ(kind, data, i)))
-            return PyBool_FromLong(0);
+            Py_RETURN_FALSE;
     }
-    return PyBool_FromLong(1);
+    Py_RETURN_TRUE;
 }
 
 int
@@ -12803,7 +12827,11 @@ unicode_rfind(PyObject *self, PyObject *args)
 PyDoc_STRVAR(rindex__doc__,
              "S.rindex(sub[, start[, end]]) -> int\n\
 \n\
-Like S.rfind() but raise ValueError when the substring is not found.");
+Return the highest index in S where substring sub is found,\n\
+such that sub is contained within S[start:end].  Optional\n\
+arguments start and end are interpreted as in slice notation.\n\
+\n\
+Raises ValueError when the substring is not found.");
 
 static PyObject *
 unicode_rindex(PyObject *self, PyObject *args)
@@ -13089,7 +13117,7 @@ unicode_rsplit_impl(PyObject *self, PyObject *sep, Py_ssize_t maxsplit)
 /*[clinic input]
 str.splitlines as unicode_splitlines
 
-    keepends: int(c_default="0") = False
+    keepends: bool(accept={int}) = False
 
 Return a list of the lines in the string, breaking at line boundaries.
 
@@ -13099,7 +13127,7 @@ true.
 
 static PyObject *
 unicode_splitlines_impl(PyObject *self, int keepends)
-/*[clinic end generated code: output=f664dcdad153ec40 input=d6ff99fe43465b0f]*/
+/*[clinic end generated code: output=f664dcdad153ec40 input=b508e180459bdd8b]*/
 {
     return PyUnicode_Splitlines(self, keepends);
 }
@@ -13978,10 +14006,11 @@ unicode_subscript(PyObject* self, PyObject* item)
         int src_kind, dest_kind;
         Py_UCS4 ch, max_char, kind_limit;
 
-        if (PySlice_GetIndicesEx(item, PyUnicode_GET_LENGTH(self),
-                                 &start, &stop, &step, &slicelength) < 0) {
+        if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
             return NULL;
         }
+        slicelength = PySlice_AdjustIndices(PyUnicode_GET_LENGTH(self),
+                                            &start, &stop, step);
 
         if (slicelength <= 0) {
             _Py_RETURN_UNICODE_EMPTY();

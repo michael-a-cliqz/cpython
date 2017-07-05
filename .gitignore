@@ -3,6 +3,7 @@
 /python
 !/Python/
 *.cover
+*.iml
 *.o
 *.orig
 *.pyc
@@ -18,6 +19,7 @@
 .gdb_history
 Doc/build/
 Doc/venv/
+Include/pydtrace_probes.h
 Lib/distutils/command/*.pdb
 Lib/lib2to3/*.pickle
 Lib/test/data/*
@@ -53,6 +55,8 @@ PCbuild/*.suo
 PCbuild/*.*sdf
 PCbuild/*-pgi
 PCbuild/*-pgo
+PCbuild/*.VC.db
+PCbuild/*.VC.opendb
 PCbuild/.vs/
 PCbuild/amd64/
 PCbuild/obj/
@@ -71,6 +75,7 @@ config.status.lineno
 core
 db_home
 .hg/
+.idea/
 ipch/
 libpython*.a
 libpython*.so*

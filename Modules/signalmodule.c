@@ -88,7 +88,7 @@ module signal
 #ifdef WITH_THREAD
 #include <sys/types.h> /* For pid_t */
 #include "pythread.h"
-static long main_thread;
+static unsigned long main_thread;
 static pid_t main_pid;
 #endif
 
@@ -139,6 +139,10 @@ timeval_from_double(double d, struct timeval *tv)
 {
     tv->tv_sec = floor(d);
     tv->tv_usec = fmod(d, 1.0) * 1000000.0;
+    /* Don't disable the timer if the computation above rounds down to zero. */
+    if (d > 0.0 && tv->tv_sec == 0 && tv->tv_usec == 0) {
+        tv->tv_usec = 1;
+    }
 }
 
 Py_LOCAL_INLINE(double)
@@ -187,12 +191,6 @@ PyDoc_STRVAR(default_int_handler_doc,
 The default handler for SIGINT installed by Python.\n\
 It raises KeyboardInterrupt.");
 
-
-static int
-checksignals_witharg(void * unused)
-{
-    return PyErr_CheckSignals();
-}
 
 static int
 report_wakeup_write_error(void *data)
@@ -244,6 +242,30 @@ trip_signal(int sig_num)
 
     Handlers[sig_num].tripped = 1;
 
+    /* Set is_tripped after setting .tripped, as it gets
+       cleared in PyErr_CheckSignals() before .tripped. */
+    is_tripped = 1;
+    _PyEval_SignalReceived();
+
+    /* And then write to the wakeup fd *after* setting all the globals and
+       doing the _PyEval_SignalReceived. We used to write to the wakeup fd
+       and then set the flag, but this allowed the following sequence of events
+       (especially on windows, where trip_signal may run in a new thread):
+
+       - main thread blocks on select([wakeup_fd], ...)
+       - signal arrives
+       - trip_signal writes to the wakeup fd
+       - the main thread wakes up
+       - the main thread checks the signal flags, sees that they're unset
+       - the main thread empties the wakeup fd
+       - the main thread goes back to sleep
+       - trip_signal sets the flags to request the Python-level signal handler
+         be run
+       - the main thread doesn't notice, because it's asleep
+
+       See bpo-30038 for more details.
+    */
+
 #ifdef MS_WINDOWS
     fd = Py_SAFE_DOWNCAST(wakeup.fd, SOCKET_T, int);
 #else
@@ -263,6 +285,8 @@ trip_signal(int sig_num)
                 wakeup.send_err_set = 1;
                 wakeup.send_errno = errno;
                 wakeup.send_win_error = GetLastError();
+                /* Py_AddPendingCall() isn't signal-safe, but we
+                   still use it for this exceptional case. */
                 Py_AddPendingCall(report_wakeup_send_error, NULL);
             }
         }
@@ -276,17 +300,12 @@ trip_signal(int sig_num)
             rc = _Py_write_noraise(fd, &byte, 1);
 
             if (rc < 0) {
+                /* Py_AddPendingCall() isn't signal-safe, but we
+                   still use it for this exceptional case. */
                 Py_AddPendingCall(report_wakeup_write_error,
                                   (void *)(intptr_t)errno);
             }
         }
-    }
-
-    if (!is_tripped) {
-        /* Set is_tripped after setting .tripped, as it gets
-           cleared in PyErr_CheckSignals() before .tripped. */
-        is_tripped = 1;
-        Py_AddPendingCall(checksignals_witharg, NULL);
     }
 }
 
@@ -1088,7 +1107,7 @@ signal_sigtimedwait_impl(PyObject *module, PyObject *sigset,
 /*[clinic input]
 signal.pthread_kill
 
-    thread_id:  long
+    thread_id:  unsigned_long(bitwise=True)
     signalnum:  int
     /
 
@@ -1096,8 +1115,9 @@ Send a signal to a thread.
 [clinic start generated code]*/
 
 static PyObject *
-signal_pthread_kill_impl(PyObject *module, long thread_id, int signalnum)
-/*[clinic end generated code: output=2a09ce41f1c4228a input=77ed6a3b6f2a8122]*/
+signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
+                         int signalnum)
+/*[clinic end generated code: output=7629919b791bc27f input=1d901f2c7bb544ff]*/
 {
     int err;
 
@@ -1437,7 +1457,7 @@ PyInit__signal(void)
 
 #if defined (HAVE_SETITIMER) || defined (HAVE_GETITIMER)
     ItimerError = PyErr_NewException("signal.ItimerError",
-            PyExc_IOError, NULL);
+            PyExc_OSError, NULL);
     if (ItimerError != NULL)
         PyDict_SetItemString(d, "ItimerError", ItimerError);
 #endif
@@ -1536,8 +1556,10 @@ PyErr_CheckSignals(void)
                                            arglist);
                 Py_DECREF(arglist);
             }
-            if (!result)
+            if (!result) {
+                is_tripped = 1;
                 return -1;
+            }
 
             Py_DECREF(result);
         }
@@ -1598,21 +1620,15 @@ _clear_pending_signals(void)
 }
 
 void
-PyOS_AfterFork(void)
+_PySignal_AfterFork(void)
 {
     /* Clear the signal flags after forking so that they aren't handled
      * in both processes if they came in just before the fork() but before
      * the interpreter had an opportunity to call the handlers.  issue9535. */
     _clear_pending_signals();
 #ifdef WITH_THREAD
-    /* PyThread_ReInitTLS() must be called early, to make sure that the TLS API
-     * can be called safely. */
-    PyThread_ReInitTLS();
-    _PyGILState_Reinit();
-    PyEval_ReInitThreads();
     main_thread = PyThread_get_thread_ident();
     main_pid = getpid();
-    _PyImport_ReInitLock();
 #endif
 }
 

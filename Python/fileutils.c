@@ -583,7 +583,7 @@ _Py_attribute_data_to_stat(BY_HANDLE_FILE_INFORMATION *info, ULONG reparse_tag,
     FILE_TIME_to_time_t_nsec(&info->ftLastWriteTime, &result->st_mtime, &result->st_mtime_nsec);
     FILE_TIME_to_time_t_nsec(&info->ftLastAccessTime, &result->st_atime, &result->st_atime_nsec);
     result->st_nlink = info->nNumberOfLinks;
-    result->st_ino = (((__int64)info->nFileIndexHigh)<<32) + info->nFileIndexLow;
+    result->st_ino = (((uint64_t)info->nFileIndexHigh) << 32) + info->nFileIndexLow;
     if (reparse_tag == IO_REPARSE_TAG_SYMLINK) {
         /* first clear the S_IFMT bits */
         result->st_mode ^= (result->st_mode & S_IFMT);
@@ -653,7 +653,7 @@ _Py_fstat_noraise(int fd, struct _Py_stat_struct *status)
 
     _Py_attribute_data_to_stat(&info, 0, status);
     /* specific to fstat() */
-    status->st_ino = (((__int64)info.nFileIndexHigh)<<32) + info.nFileIndexLow;
+    status->st_ino = (((uint64_t)info.nFileIndexHigh) << 32) + info.nFileIndexLow;
     return 0;
 #else
     return fstat(fd, status);
@@ -711,21 +711,32 @@ _Py_stat(PyObject *path, struct stat *statbuf)
 #ifdef MS_WINDOWS
     int err;
     struct _stat wstatbuf;
-    wchar_t *wpath;
+    const wchar_t *wpath;
 
-    wpath = PyUnicode_AsUnicode(path);
+    wpath = _PyUnicode_AsUnicode(path);
     if (wpath == NULL)
         return -2;
+
     err = _wstat(wpath, &wstatbuf);
     if (!err)
         statbuf->st_mode = wstatbuf.st_mode;
     return err;
 #else
     int ret;
-    PyObject *bytes = PyUnicode_EncodeFSDefault(path);
+    PyObject *bytes;
+    char *cpath;
+
+    bytes = PyUnicode_EncodeFSDefault(path);
     if (bytes == NULL)
         return -2;
-    ret = stat(PyBytes_AS_STRING(bytes), statbuf);
+
+    /* check for embedded null bytes */
+    if (PyBytes_AsStringAndSize(bytes, &cpath, NULL) == -1) {
+        Py_DECREF(bytes);
+        return -2;
+    }
+
+    ret = stat(cpath, statbuf);
     Py_DECREF(bytes);
     return ret;
 #endif
@@ -1080,7 +1091,7 @@ _Py_fopen_obj(PyObject *path, const char *mode)
     FILE *f;
     int async_err = 0;
 #ifdef MS_WINDOWS
-    wchar_t *wpath;
+    const wchar_t *wpath;
     wchar_t wmode[10];
     int usize;
 
@@ -1094,7 +1105,7 @@ _Py_fopen_obj(PyObject *path, const char *mode)
                      Py_TYPE(path));
         return NULL;
     }
-    wpath = PyUnicode_AsUnicode(path);
+    wpath = _PyUnicode_AsUnicode(path);
     if (wpath == NULL)
         return NULL;
 
